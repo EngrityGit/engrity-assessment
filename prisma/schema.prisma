@@ -1,0 +1,538 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Round {
+  MATH
+  PERSONALITY
+  MEMORY
+  IQ
+  CRITICAL_THINKING
+  TECHNICAL_SCREENING
+}
+
+enum JobRole {
+  NDT
+  ROPE_ACCESS
+  QC_INSPECTION
+  CIVIL
+  WELDING
+  COATING
+  ELECTRICAL_INSTRUMENTATION
+  PROJECT_MANAGEMENT
+  GEOTECHNICAL
+  ACCOUNTS
+  HR
+  SALES
+  OPERATIONS
+  DIGITAL_MARKETING
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+  EXPIRED
+  // Terminated automatically after repeated integrity violations
+  // (see recordIntegrityEvent in src/app/actions/integrity.ts).
+  DISQUALIFIED
+}
+
+enum PersonalityTrait {
+  TEAMWORK
+  CONSCIENTIOUSNESS
+  STRESS_TOLERANCE
+  ADAPTABILITY
+  LEADERSHIP
+}
+
+enum Role {
+  CANDIDATE
+  ADMIN
+}
+
+enum IntegrityEventType {
+  TAB_HIDDEN
+  WINDOW_BLUR
+  COPY
+  PASTE
+  CUT
+  FULLSCREEN_EXIT
+  CONTEXT_MENU
+  BLOCKED_SHORTCUT
+  DEVTOOLS
+  BULK_INPUT
+}
+
+enum CredentialKind {
+  CERTIFICATION
+  SAFETY_TICKET
+}
+
+enum AccessRequestStatus {
+  PENDING
+  APPROVED
+  DECLINED
+}
+
+enum InterviewStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  ABANDONED
+}
+
+enum GameKind {
+  SYMBOL_MATCH
+  SPEED_ROUND
+  ERROR_HUNT
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  // Nullable: accounts migrated from the pre-auth system start with no
+  // password until the candidate uses their one-time setup link.
+  passwordHash String?
+  role         Role
+  createdAt    DateTime @default(now())
+
+  // One-time link for candidates migrated from the email-only system, and
+  // for future invite/reset flows. Cleared once a password is set.
+  passwordSetupToken   String?   @unique
+  passwordSetupExpires DateTime?
+
+  candidate Candidate?
+
+  documents      Document[]      @relation("DocumentOwner")
+  documentShares DocumentShare[]
+  invitations    Invitation[]    @relation("InvitationCreator")
+  aiUsage        AiUsage[]
+}
+
+model Candidate {
+  id         String   @id @default(cuid())
+  userId     String   @unique
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fullName   String
+  email      String   @unique
+  // The job the candidate is being assessed for — used to pick a
+  // role-relevant Critical Thinking scenario and to frame its AI grading.
+  // Null falls back to a generic scenario.
+  targetRole JobRole?
+  createdAt  DateTime @default(now())
+
+  attempts       Attempt[]
+  assignments    Assignment[]
+  groups         GroupMember[]
+  certificates   Certificate[]
+  interviews     Interview[]
+  credentials    Credential[]
+  lessonProgress LessonProgress[]
+  gameScores     GameScore[]
+}
+
+model Group {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  members GroupMember[]
+}
+
+model GroupMember {
+  id          String    @id @default(cuid())
+  groupId     String
+  group       Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, candidateId])
+}
+
+// A candidate assigned the standard 4-round assessment, optionally with a
+// due date. Phase 1 keeps this to one assignment = the whole round set;
+// per-round / cohort assignment is a later-phase admin workflow feature.
+model Assignment {
+  id            String    @id @default(cuid())
+  candidateId   String
+  candidate     Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  dueAt         DateTime?
+  createdAt     DateTime  @default(now())
+  // When true the candidate skips Math/Personality/Memory/IQ/Critical Thinking
+  // and goes straight to their role's Technical Screening exam.
+  technicalOnly Boolean   @default(false)
+
+  attempts Attempt[]
+}
+
+model Attempt {
+  id             String        @id @default(cuid())
+  candidateId    String
+  candidate      Candidate     @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  // Nullable: existing attempts predate the Assignment model.
+  assignmentId   String?
+  assignment     Assignment?   @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  status         AttemptStatus @default(IN_PROGRESS)
+  currentRound   Round         @default(MATH)
+  roundStartedAt DateTime      @default(now())
+  // False while the candidate is on the pre-round wizard (instructions, tips,
+  // tutorial). The round clock only starts once they press Start.
+  roundReady     Boolean       @default(false)
+  startedAt      DateTime      @default(now())
+  submittedAt    DateTime?
+
+  // Integrity warnings issued so far — distinct incidents, not raw events
+  // (a tab switch fires several events at once). Starts at 0 for every
+  // attempt, including ones that predate this feature.
+  violationCount  Int       @default(0)
+  lastViolationAt DateTime?
+  disqualifiedAt  DateTime?
+
+  mathScore Int?
+  mathMax   Int?
+
+  iqScore Int?
+  iqMax   Int?
+
+  personalityTraits Json? // { TEAMWORK: 7.2, ... } out of 10
+  personalityRaw    Json? // [{ questionId, value }] raw 1-5 responses, for review
+
+  memoryAccuracyPct   Int?
+  memoryAvgReactionMs Int?
+  memoryRaw           Json? // trial-by-trial log, for review
+  // Server-generated when entering the memory round (see submitPersonalityRound).
+  // Source of truth for re-deriving isRepeat/correct — never trust the client's own labels.
+  memorySequence      Json?
+
+  criticalThinkingScenarioId String?
+  criticalThinkingResponse   String?
+  // { decisionMaking, safetyAwareness, riskAssessment, communication, problemSolving } each 0-10
+  criticalThinkingScores     Json?
+  criticalThinkingSummary    String?
+
+  // AI-generated narrative reports. Null until the round is scored (or if
+  // ANTHROPIC_API_KEY isn't configured / the call failed) — never blocks
+  // round submission, see src/lib/ai.ts.
+  personalitySummary Json?
+  iqSummary          Json?
+
+  answers                     Answer[]
+  integrityEvents             IntegrityEvent[]
+  certificate                 Certificate?
+  criticalThinkingResponses   CriticalThinkingResponse[]
+  technicalScreeningResponses TechnicalScreeningResponse[]
+}
+
+model IntegrityEvent {
+  id         String             @id @default(cuid())
+  attemptId  String
+  attempt    Attempt            @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  type       IntegrityEventType
+  occurredAt DateTime           @default(now())
+}
+
+model Certificate {
+  id               String    @id @default(cuid())
+  candidateId      String
+  candidate        Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  attemptId        String    @unique
+  attempt          Attempt   @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  verificationCode String    @unique
+  issuedAt         DateTime  @default(now())
+}
+
+// Shared by MATH and IQ rounds — both are multiple choice with one correct answer.
+model Question {
+  id           String   @id @default(cuid())
+  round        Round
+  prompt       String
+  options      String[]
+  correctIndex Int
+  order        Int      @default(0)
+
+  answers Answer[]
+}
+
+model Answer {
+  id            String   @id @default(cuid())
+  attemptId     String
+  attempt       Attempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  questionId    String
+  question      Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  selectedIndex Int?
+  isCorrect     Boolean  @default(false)
+
+  @@unique([attemptId, questionId])
+}
+
+model PersonalityQuestion {
+  id            String           @id @default(cuid())
+  statement     String
+  trait         PersonalityTrait
+  reverseScored Boolean          @default(false)
+  order         Int              @default(0)
+}
+
+// role: null = generic scenario, used when a candidate has no targetRole
+// or no scenario matches theirs.
+model CriticalThinkingScenario {
+  id     String   @id @default(cuid())
+  role   JobRole?
+  prompt String
+  order  Int      @default(0)
+
+  responses CriticalThinkingResponse[]
+}
+
+// One row per scenario question presented to a candidate during the
+// Critical Thinking / Interview Questions round (several per Attempt, see
+// pickCriticalThinkingScenarios in src/app/actions/attempt.ts). Created as
+// empty placeholders when the round starts, filled in on submit. The legacy
+// singular criticalThinkingScenarioId/Response/Scores/Summary fields on
+// Attempt stay as the aggregate (used by computeOverallScore) and as the
+// fallback for attempts that predate this table.
+model CriticalThinkingResponse {
+  id           String                   @id @default(cuid())
+  attemptId    String
+  attempt      Attempt                  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  scenarioId   String
+  scenario     CriticalThinkingScenario @relation(fields: [scenarioId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  response     String                   @default("")
+  // { decisionMaking, safetyAwareness, riskAssessment, communication, problemSolving } each 0-10
+  scores       Json?
+  summary      String?
+  order        Int                      @default(0)
+  // Client-side typing telemetry { keystrokes, chars, pasteBlocked, activeMs }
+  // and the AI's authenticity screen { aiLikelihood 0-100, signals[] }.
+  typingStats  Json?
+  authenticity Json?
+
+  @@unique([attemptId, scenarioId])
+}
+
+// Bank of technical screening questions for the Technical Screening round —
+// role-conditional: a candidate only gets this round if their targetRole
+// has questions here (see pickTechnicalScreeningQuestions in
+// src/app/actions/attempt.ts). Unlike Critical Thinking, every question for
+// the role is presented (no sampling) since this is meant to be a
+// comprehensive technical exam, not a spot-check.
+//
+// Two question types share this table: free-text (options empty,
+// correctIndex null — graded by AI against referenceAnswer, e.g. QC/E&I)
+// and multiple-choice (options populated, correctIndex set — graded
+// deterministically like the MATH/IQ rounds, e.g. NDT). referenceAnswer is
+// always populated (for MCQ it holds the correct option's text) so there's
+// human-readable context either way.
+model TechnicalScreeningQuestion {
+  id              String   @id @default(cuid())
+  role            JobRole
+  topic           String
+  prompt          String
+  referenceAnswer String
+  options         String[] @default([])
+  correctIndex    Int?
+  maxPoints       Int
+  order           Int      @default(0)
+
+  responses TechnicalScreeningResponse[]
+}
+
+// One row per question presented to a candidate in the Technical Screening
+// round. Created as empty placeholders when the round starts, filled in on
+// submit — same pattern as CriticalThinkingResponse. Not folded into
+// computeOverallScore (src/lib/quiz.ts) since it's role-conditional; shown
+// as its own score/section on the report and certificate instead.
+model TechnicalScreeningResponse {
+  id            String                     @id @default(cuid())
+  attemptId     String
+  attempt       Attempt                    @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  questionId    String
+  question      TechnicalScreeningQuestion @relation(fields: [questionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  response      String                     @default("") // free-text answer; unused for MCQ questions
+  selectedIndex Int? // MCQ answer; unused for free-text questions
+  pointsAwarded Int?
+  feedback      String?
+  order         Int                        @default(0)
+  typingStats   Json?
+  authenticity  Json?
+
+  @@unique([attemptId, questionId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Invitations & access requests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// An admin-created invitation. Two flavours share one table:
+//  - email invite:  `email` set, maxUses 1, emailed to the recipient
+//  - share link:    `email` null, maxUses N — anyone with the link can join
+model Invitation {
+  id             String    @id @default(cuid())
+  token          String    @unique
+  email          String?
+  fullName       String?
+  role           Role      @default(CANDIDATE)
+  targetRole     JobRole?
+  // Optional automatic assignment on acceptance.
+  assignStandard Boolean   @default(false)
+  technicalOnly  Boolean   @default(false)
+  groupId        String?
+  note           String?
+  maxUses        Int       @default(1)
+  uses           Int       @default(0)
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  createdById    String
+  createdBy      User      @relation("InvitationCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  createdAt      DateTime  @default(now())
+  emailedAt      DateTime?
+}
+
+model AccessRequest {
+  id           String              @id @default(cuid())
+  fullName     String
+  email        String
+  targetRole   JobRole?
+  message      String?
+  status       AccessRequestStatus @default(PENDING)
+  createdAt    DateTime            @default(now())
+  reviewedAt   DateTime?
+  invitationId String?
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI voice interview
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Interview {
+  id           String          @id @default(cuid())
+  candidateId  String
+  candidate    Candidate       @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  title        String          @default("Technical screening interview")
+  targetRole   JobRole?
+  status       InterviewStatus @default(PENDING)
+  // [{ key, label, weight, description }] — what the AI rates against.
+  criteria     Json
+  // Extra admin guidance the AI must probe (free text, never shown to the candidate).
+  focusNotes   String?
+  maxQuestions Int             @default(10)
+  dueAt        DateTime?
+  createdAt    DateTime        @default(now())
+  startedAt    DateTime?
+  completedAt  DateTime?
+
+  // [{ role: "ai"|"candidate", text, at, phase?, mode?, delayMs?, durationMs?, words? }]
+  transcript     Json    @default("[]")
+  // Captured during the conversation.
+  selfRating     Int?
+  expectations   Json?
+  // Evaluation output — admin only.
+  scores         Json?
+  overallScore   Float?
+  recommendation String?
+  summary        Json?
+  providers      String?
+  integrity      Json?
+  violationCount Int     @default(0)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Learning hub
+// ─────────────────────────────────────────────────────────────────────────────
+
+model LessonProgress {
+  id          String    @id @default(cuid())
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  lessonSlug  String
+  completedAt DateTime?
+  quizScore   Int?
+  quizMax     Int?
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([candidateId, lessonSlug])
+}
+
+model GameScore {
+  id          String    @id @default(cuid())
+  candidateId String
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  game        GameKind
+  score       Int
+  maxScore    Int?
+  durationMs  Int?
+  createdAt   DateTime  @default(now())
+
+  @@index([candidateId, game])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Certifications, safety tickets, documents
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Credential {
+  id          String         @id @default(cuid())
+  candidateId String
+  candidate   Candidate      @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  kind        CredentialKind
+  name        String
+  issuer      String?
+  number      String?
+  issuedAt    DateTime?
+  expiresAt   DateTime?
+  notes       String?
+  documentId  String?
+  document    Document?      @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  createdAt   DateTime       @default(now())
+
+  @@index([candidateId])
+  @@index([expiresAt])
+}
+
+// File bytes live in Postgres (<= 4 MB per file) so the app needs no extra
+// storage service. Access is always checked server-side in
+// src/app/api/documents/[id]/route.ts.
+model Document {
+  id               String   @id @default(cuid())
+  ownerId          String
+  owner            User     @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  title            String
+  fileName         String
+  mimeType         String
+  size             Int
+  data             Bytes
+  // Visible to every admin (used by candidates sharing with Engrity).
+  sharedWithAdmins Boolean  @default(false)
+  createdAt        DateTime @default(now())
+
+  shares      DocumentShare[]
+  credentials Credential[]
+}
+
+model DocumentShare {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([documentId, userId])
+}
+
+// Lightweight usage log used for per-user AI rate limiting.
+model AiUsage {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  feature   String
+  provider  String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
