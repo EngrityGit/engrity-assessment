@@ -3,12 +3,14 @@ import { redirect } from "next/navigation";
 import { signupCandidate } from "@/app/actions/auth";
 import { openSignupAllowed } from "@/lib/signup-policy";
 import AuthCard, { ErrorNote } from "@/components/ui/AuthCard";
+import PasswordInput from "@/components/ui/PasswordInput";
 
 export const metadata = { title: "Create account" };
 
 export default async function SignupPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
   if (!openSignupAllowed()) redirect("/request-access");
   const { error } = await searchParams;
+
   return (
     <AuthCard title="Create your account" subtitle="View and complete the assessments Engrity assigns to you, and use the training tools." wide>
       <ErrorNote error={error} />
@@ -23,7 +25,14 @@ export default async function SignupPage({ searchParams }: { searchParams: Promi
         </div>
         <div>
           <label className="label" htmlFor="password">Password</label>
-          <input id="password" name="password" type="password" required minLength={8} autoComplete="new-password" className="input" />
+          {/* Replaced raw input with PasswordInput */}
+          <PasswordInput
+            id="password"
+            name="password"
+            required
+            minLength={8}
+            autoComplete="new-password"
+          />
           <p className="hint mt-1">At least 8 characters, with a letter and a number.</p>
         </div>
         <label className="flex items-start gap-2 text-sm text-ink/80">

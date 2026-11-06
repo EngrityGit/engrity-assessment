@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { loginAction } from "@/app/actions/auth";
 import AuthCard, { ErrorNote } from "@/components/ui/AuthCard";
+import PasswordInput from "@/components/ui/PasswordInput";
 
 export const metadata = { title: "Log in" };
 
@@ -16,7 +17,12 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         </div>
         <div>
           <label className="label" htmlFor="password">Password</label>
-          <input id="password" name="password" type="password" required autoComplete="current-password" className="input" />
+          <PasswordInput
+            id="password"
+            name="password"
+            required
+            autoComplete="current-password"
+          />
         </div>
         <button type="submit" className="btn btn-primary w-full">Log in</button>
       </form>
